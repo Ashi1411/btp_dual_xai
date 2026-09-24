@@ -1,0 +1,19 @@
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Large Model Weights & Data (Optional: ignore if > 100MB)
+*.pth
+*.joblib
+*.png
+*.jpg
+*.csv
+
+# VS Code / IDE settings
+.vscode/
+.idea/
