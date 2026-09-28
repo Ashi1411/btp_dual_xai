@@ -41,7 +41,10 @@ class ExplainableSolarFaultDetector:
 
         # 3. Load ResNet-18 Thermal Vision Model
         self.vision_model = None
-        self.device = torch.device("cuda" if TORCH_AVAILABLE and torch.cuda.is_available() else "cpu")
+        if TORCH_AVAILABLE:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = None
 
         if vision_model_path and os.path.exists(vision_model_path) and TORCH_AVAILABLE:
             try:
@@ -199,43 +202,66 @@ class ExplainableSolarFaultDetector:
         vis_class = vision_xai.get("primary_detected_class")
         vis_conf = vision_xai.get("max_confidence", 0.0)
 
-        # Step 3: Combined Decision Logic & Diagnosis Categorization
+        # Step 3: Combined Decision Logic & Dual-Stream Cross-Checking
         final_status = "HEALTHY"
+        decision_reason = "DUAL_STREAM_AGREEMENT"
         primary_cause = ""
         xai_factors = []
 
-        # Decision Rule 1: CRACKED (Physical surface fracture)
-        if vis_class == "CRACKED" and vis_conf >= 0.40:
-            final_status = "CRACKED"
-            primary_cause = "Physical mechanical crack detected on panel surface via thermal imaging."
-            xai_factors.append(f"ResNet-18 thermal vision stream identified structural crack ({vis_conf * 100:.1f}% confidence).")
-            if scada_xai["power_deficit_pct"] > 15.0:
-                xai_factors.append(f"Active fault is causing a {scada_xai['power_deficit_pct']}% electrical output drop.")
+        power_deficit = scada_xai["power_deficit_pct"]
+        mod_temp = float(scada_input.get("MODULE_TEMPERATURE", 25.0))
+        irr = float(scada_input.get("IRRADIATION", 0.80))
 
-        # Decision Rule 2: HOTSPOT (Cell degradation / localized overheating)
-        elif vis_class == "HOTSPOT" or (scada_xai["scada_fault_prob"] > 0.60 and scada_input.get("MODULE_TEMPERATURE", 0) > 55.0):
-            final_status = "HOTSPOT"
-            primary_cause = "Localized thermal hotspot detected causing thermal resistance and cell stress."
-            if vis_class == "HOTSPOT":
-                xai_factors.append(f"ResNet-18 thermal vision stream detected hotspot anomaly ({vis_conf * 100:.1f}% confidence).")
-            if scada_input.get("MODULE_TEMPERATURE", 0) > 55.0:
-                xai_factors.append(f"Elevated module temperature at {scada_input.get('MODULE_TEMPERATURE')}°C exceeds thermal threshold.")
+        # --- CROSS-CHECK 1: VISION FALSE ALARM CLEARANCE ---
+        # Vision flags a fault, but SCADA electrical output & temperature are 100% healthy.
+        if vis_class in ["CRACKED", "HOTSPOT"] and power_deficit < 5.0 and mod_temp < 50.0:
+            final_status = "HEALTHY"
+            decision_reason = "VISION_FALSE_ALARM_CLEARED"
+            primary_cause = "Visual anomaly (reflection/glare/dirt) overruled by normal electrical power output."
+            xai_factors.append(f"Vision model flagged {vis_class} ({vis_conf*100:.1f}% conf), but SCADA confirmed 0% power drop and normal temp ({mod_temp}°C).")
 
-        # Decision Rule 3: SHADOW (Soiling, cloud cover, or temporary obstruction)
-        elif vis_class == "SHADOW" or (scada_xai["power_deficit_pct"] > 25.0 and scada_input.get("IRRADIATION", 0) < 0.40):
+        # --- CROSS-CHECK 2: CLOUD FILTER / SCADA FALSE ALARM MITIGATION ---
+        # Electrical drop is driven by low sunlight (passing cloud), not physical defect.
+        elif irr < 0.40 and power_deficit >= 15.0:
             final_status = "SHADOW"
-            primary_cause = "Transient optical shadow, cloud cover, or surface soiling suppressing light absorption."
-            if vis_class == "SHADOW":
-                xai_factors.append(f"ResNet-18 thermal vision stream detected shadow/soiling pattern ({vis_conf * 100:.1f}% confidence).")
-            if scada_input.get("IRRADIATION", 0) < 0.40:
-                xai_factors.append(f"Solar irradiance is suppressed at {scada_input.get('IRRADIATION')} kW/m².")
+            decision_reason = "CLOUD_SHADOW_FILTERED"
+            primary_cause = "Electrical drop caused by temporary cloud shadow / low irradiance."
+            xai_factors.append(f"Irradiance suppressed at {irr} kW/m². Cloud filter prevented false structural damage alarm.")
 
-        # Decision Rule 4: HEALTHY
+        # --- CROSS-CHECK 3: VISION BLIND SPOT RECOVERY (SCADA Catches Missed Fault) ---
+        # Vision predicted HEALTHY, but SCADA shows large electrical deficit under good sunlight.
+        elif vis_class == "HEALTHY" and power_deficit >= 18.0 and irr >= 0.50:
+            final_status = "CRACKED"
+            decision_reason = "VISION_BLINDSPOT_RECOVERED"
+            primary_cause = "Internal cell crack missed by thermal camera, detected by SCADA power drop."
+            xai_factors.append(f"Vision model missed defect (predicted Healthy), but SCADA detected severe power drop of {power_deficit}%.")
+
+        # --- CROSS-CHECK 4: SCADA BLIND SPOT RECOVERY (Vision Catches Thermal Hotspot) ---
+        # Vision detects thermal hotspot before overall string power drops significantly.
+        elif vis_class == "HOTSPOT" and mod_temp >= 55.0:
+            final_status = "HOTSPOT"
+            decision_reason = "SCADA_BLINDSPOT_RECOVERED"
+            primary_cause = "Localized thermal hotspot detected by thermal IR vision prior to severe string-level power drop."
+            xai_factors.append(f"Thermal camera identified overheating hotspot ({mod_temp}°C) with {vis_conf*100:.1f}% confidence.")
+
+        # --- STANDARD DECISION RULES ---
+        elif vis_class == "CRACKED" and vis_conf >= 0.40:
+            final_status = "CRACKED"
+            decision_reason = "DUAL_CONFIRMED"
+            primary_cause = "Physical mechanical crack confirmed on panel surface."
+            xai_factors.append(f"Thermal vision identified crack ({vis_conf * 100:.1f}% confidence). Power deficit: {power_deficit}%.")
+
+        elif vis_class == "SHADOW":
+            final_status = "SHADOW"
+            decision_reason = "DUAL_CONFIRMED"
+            primary_cause = "Surface shading or soiling pattern detected."
+            xai_factors.append(f"Thermal vision stream detected shadow pattern ({vis_conf * 100:.1f}% confidence).")
+
         else:
             final_status = "HEALTHY"
+            decision_reason = "DUAL_CONFIRMED"
             primary_cause = "Panel operating within nominal electrical and thermal limits."
-            xai_factors.append(f"Actual power ({scada_xai['actual_dc_power']}W) aligns with expected target ({scada_xai['expected_dc_power']}W).")
-            xai_factors.append("No critical visual surface anomalies or hotspot defects detected.")
+            xai_factors.append("No critical visual defects or electrical anomalies detected.")
 
         # Append telemetry drivers into XAI reasoning list
         for key, value in scada_xai["key_telemetry_drivers"].items():
