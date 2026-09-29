@@ -194,10 +194,10 @@ class ExplainableSolarFaultDetector:
         # Step 2: Explainable Vision Diagnostics
         vision_xai = self._analyze_vision_xai(thermal_image_input)
         
-        # Testing simulation override (if image not provided during quick test)
-        if simulated_vision_class:
-            vision_xai["primary_detected_class"] = simulated_vision_class.upper()
-            vision_xai["max_confidence"] = 0.92
+        # # Testing simulation override (if image not provided during quick test)
+        # if simulated_vision_class:
+        #     vision_xai["primary_detected_class"] = simulated_vision_class.upper()
+        #     vision_xai["max_confidence"] = 0.92
 
         vis_class = vision_xai.get("primary_detected_class")
         vis_conf = vision_xai.get("max_confidence", 0.0)
@@ -238,28 +238,34 @@ class ExplainableSolarFaultDetector:
 
         # --- CROSS-CHECK 4: SCADA BLIND SPOT RECOVERY (Vision Catches Thermal Hotspot) ---
         # Vision detects thermal hotspot before overall string power drops significantly.
-        elif vis_class == "HOTSPOT" and mod_temp >= 55.0:
+        elif vis_class == "HOTSPOT" and power_deficit < 15.0 and mod_temp >= 55.0:
             final_status = "HOTSPOT"
             decision_reason = "SCADA_BLINDSPOT_RECOVERED"
-            primary_cause = "Localized thermal hotspot detected by thermal IR vision prior to severe string-level power drop."
-            xai_factors.append(f"Thermal camera identified overheating hotspot ({mod_temp}°C) with {vis_conf*100:.1f}% confidence.")
+            primary_cause = "Localized thermal hotspot detected by thermal IR vision before total string power collapses."
+            xai_factors.append(f"Thermal camera identified overheating hotspot ({mod_temp}°C) with {vis_conf*100:.1f}% confidence prior to significant overall power loss..")
 
         # --- STANDARD DECISION RULES ---
+        elif vis_class == "HOTSPOT" and mod_temp >= 55.0:
+            final_status = "HOTSPOT"
+            decision_reason = "DUAL_STREAM_AGREEMENT"
+            primary_cause = "Thermal hotspot confirmed by elevated module temperature."
+            xai_factors.append(f"Thermal camera identified hotspot ({vis_conf*100:.1f}% conf) aligned with high temp ({mod_temp}°C).")
+
         elif vis_class == "CRACKED" and vis_conf >= 0.40:
             final_status = "CRACKED"
-            decision_reason = "DUAL_CONFIRMED"
+            decision_reason = "DUAL_STREAM_AGREEMENT"
             primary_cause = "Physical mechanical crack confirmed on panel surface."
             xai_factors.append(f"Thermal vision identified crack ({vis_conf * 100:.1f}% confidence). Power deficit: {power_deficit}%.")
 
         elif vis_class == "SHADOW":
             final_status = "SHADOW"
-            decision_reason = "DUAL_CONFIRMED"
+            decision_reason = "DUAL_STREAM_AGREEMENT"
             primary_cause = "Surface shading or soiling pattern detected."
             xai_factors.append(f"Thermal vision stream detected shadow pattern ({vis_conf * 100:.1f}% confidence).")
 
         else:
             final_status = "HEALTHY"
-            decision_reason = "DUAL_CONFIRMED"
+            decision_reason = "DUAL_STREAM_AGREEMENT"
             primary_cause = "Panel operating within nominal electrical and thermal limits."
             xai_factors.append("No critical visual defects or electrical anomalies detected.")
 
@@ -269,6 +275,7 @@ class ExplainableSolarFaultDetector:
 
         return {
             "prediction": final_status,
+            "decision_reason": decision_reason,
             "explainable_ai": {
                 "root_cause_summary": primary_cause,
                 "contributing_factors": xai_factors,

@@ -92,42 +92,6 @@ def compute_power_deficit(telemetry: dict) -> float:
     return round(deficit_pct, 2)
 
 
-def apply_multimodal_fusion_logic(pred_vision: str, telemetry: dict) -> tuple[str, str, bool]:
-    """
-    Multimodal Decision Fusion Logic:
-    1. Vision False Alarm Clearance (SCADA clears vision false alarms when power & temp are normal).
-    2. Cloud Shadow Filter (Suppresses false hardware damage alarms during low irradiance).
-    3. Vision Blind Spot Recovery (SCADA catches electrical power drops missed by thermal camera).
-    4. SCADA Blind Spot Recovery (Thermal vision catches localized hotspots before severe power collapse).
-    """
-    vis_clean = str(pred_vision).upper().strip()
-    power_deficit = compute_power_deficit(telemetry)
-    mod_temp = telemetry["MODULE_TEMPERATURE"]
-    irr = telemetry["IRRADIATION"]
-    
-    # CASE 1: VISION FALSE ALARM CLEARANCE
-    # Vision over-predicts fault on healthy panel, but SCADA electrical output is normal (deficit < 5%, temp < 50°C)
-    if vis_clean in ["CRACKED", "HOTSPOT"] and power_deficit < 5.0 and mod_temp < 50.0:
-        return "HEALTHY", "VISION_FALSE_ALARM_CLEARED", True
-
-    # CASE 2: CLOUD SHADOW FILTER
-    # Electrical drop is driven by low sunlight (irr < 0.40), not physical damage.
-    if irr < 0.40 and power_deficit >= 15.0:
-        return "SHADOW", "CLOUD_SHADOW_FILTERED", True
-
-    # CASE 3: VISION BLIND SPOT RECOVERY (SCADA Catches Missed Fault)
-    # Vision missed defect (predicted HEALTHY), but SCADA shows severe power drop (>= 18%) under high sunlight.
-    if vis_clean == "HEALTHY" and power_deficit >= 18.0 and irr >= 0.50:
-        return "CRACKED", "VISION_BLINDSPOT_RECOVERED", True
-
-    # CASE 4: SCADA BLIND SPOT RECOVERY (Vision Catches Hotspot)
-    # Thermal vision detects localized overheating before total string power collapses.
-    if vis_clean == "HOTSPOT" and mod_temp >= 55.0:
-        return "HOTSPOT", "SCADA_BLINDSPOT_RECOVERED", True
-
-    return vis_clean, "DUAL_STREAM_AGREEMENT", False
-
-
 def run_large_scale_evaluation(test_dir: str):
     # Set seed for consistent, defensible academic results
     np.random.seed(42)
@@ -178,12 +142,16 @@ def run_large_scale_evaluation(test_dir: str):
             
             # Base vision inference
             res = detector.evaluate_panel(scada_input=telemetry, thermal_image_input=img_path)
+
+            # Read predictions & metrics directly from integrated model output
+            pred_integrated = str(res.get("prediction", "UNKNOWN")).upper().strip()
             
             raw_vision = res["explainable_ai"]["vision_metrics"].get("primary_detected_class", "UNKNOWN")
             pred_vision = str(raw_vision).upper().strip()
-
-            # Apply Decision Fusion Logic
-            pred_integrated, decision_reason, was_corrected = apply_multimodal_fusion_logic(pred_vision, telemetry)
+            
+            decision_reason = res.get("decision_reason", "DUAL_STREAM_AGREEMENT")
+            was_corrected = (decision_reason != "DUAL_STREAM_AGREEMENT")
+            
             fusion_stats[decision_reason] = fusion_stats.get(decision_reason, 0) + 1
 
             y_true.append(c.upper().strip())
